@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-missouri-code",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Missouri Revised Statutes — state statutes by citation.",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-fe04100c46131c9219086bedcf1fb626623970cef8c75e70a074c68884f4cb96",
-    "sourceCommit": "adb69d997f82a62e8e22b594488c7d04a227db35"
+    "sourceHash": "v1-c6abd8f98cd65bc56ae5b16b090424fefe32f3a0ec117f647ac6d0c72abab4fb",
+    "sourceCommit": "6182c4cfebddb94950e060b5d2fca18f18ad1aca"
   }
 }
