@@ -1070,10 +1070,97 @@ function sliceSection(text: string, heading: RegExp, next: RegExp): string | nul
   }
   return best && best.length > 0 ? best : null;
 }
+
+
+/**
+ * Read side of the shared stored statute copy (fleet #3754).
+ *
+ * The write side was already shared (scripts/lib/statute-bake.mjs writes the chapter files,
+ * scripts/lib/upload-statute-bundles.mjs publishes them to R2 under `statutes/<xx>/`). Each pack then carried
+ * its own copy of the reader below: Michigan, Ohio and West Virginia are byte-for-byte the same except for
+ * the prefix. This is that reader, once. Packs hand it the injected `_r2` binding (manifest `injectR2`) and
+ * nothing is evaluated at module scope except an empty Map.
+ *
+ * ABSENCE IS NEVER MEMOISED: a missing object or a failed read is retried on the next call, so a chapter
+ * published later is not latched as missing. A read that fails returns null, which a pack must treat as
+ * "ask the source", never as "no such section".
+ */
+
+interface R2Like {
+  get(key: string): Promise<{ text(): Promise<string> } | null>;
+}
+
+interface StoredSection { h: string | null; t: string; e?: string | null }
+interface StoredChapterHead {
+  chapter: string;
+  dataAsOf: string;
+  toc: string[];
+  noText?: string[];
+  sections?: Record<string, StoredSection>;
+  parts?: number;
+  partOf?: Record<string, number>;
+}
+interface StoredPart { sections: Record<string, StoredSection> }
+
+const MEMO_TTL_MS = 10 * 60 * 1000;
+const memo = new Map<string, { at: number; doc: unknown }>();
+
+/**
+ * One JSON object from the store, parsed and validated, memoised per isolate for a few minutes.
+ * `memoMax` bounds how many parsed objects an isolate keeps (a multi-MB title bundle wants 2, a ~100 KB chapter 6).
+ */
+async function readStoredJson<T>(
+  r2: unknown, key: string, valid: (d: any) => boolean, memoMax = 6,
+): Promise<T | null> {
+  if (!r2 || typeof (r2 as R2Like).get !== 'function') return null;
+  const hit = memo.get(key);
+  if (hit && Date.now() - hit.at < MEMO_TTL_MS) return hit.doc as T;
+  try {
+    const obj = await (r2 as R2Like).get(key);
+    if (!obj) return null;
+    const d = JSON.parse(await obj.text());
+    if (!valid(d)) return null;
+    memo.delete(key);
+    memo.set(key, { at: Date.now(), doc: d });
+    while (memo.size > memoMax) memo.delete(memo.keys().next().value as string);
+    return d as T;
+  } catch {
+    return null;
+  }
+}
+
+type StoredLookup = { head: StoredChapterHead; hit: StoredSection | null };
+
+/**
+ * The stored chapter head (`<prefix>/ch-<chapter>.json`), plus the section's text when the copy has it, following
+ * the head-plus-parts layout statute-bake.mjs writes. Null = go to the live path. `hit: null` with a head means the
+ * chapter is stored and the section has no stored text: check `head.toc` to tell "does not exist" from "listed, no text".
+ */
+async function storedChapterSection(
+  r2: unknown, prefix: string, chapter: string, section: string,
+): Promise<StoredLookup | null> {
+  const head = await readStoredJson<StoredChapterHead>(r2, `${prefix}/ch-${chapter}.json`,
+    (d) => d && Array.isArray(d.toc) && typeof d.dataAsOf === 'string' && (d.sections || (typeof d.parts === 'number' && d.partOf)));
+  if (!head) return null;
+  if (head.sections) return { head, hit: head.sections[section] ?? null };
+  const k = head.partOf?.[section];
+  if (k === undefined) return { head, hit: null };
+  const part = await readStoredJson<StoredPart>(r2, `${prefix}/ch-${chapter}.p${k}.json`, (d) => d && d.sections);
+  if (!part) return null; // the part is unreadable: do not claim "not found", ask the source
+  return { head, hit: part.sections[section] ?? null };
+}
 /**
  * Missouri Revised Statutes — state statutes by citation.
  *
  * Answers HTTP 200 for a citation that does not exist, so the section number itself is confirmed in the returned text before the page is treated as a statute.
+ *
+ * STORED COPY (fleet #3754): the Revisor's site refuses requests that leave from some data centres (58 "down"
+ * against 17 successes from external callers over 14 days), and a cache cannot fix a first touch, so the Revised
+ * Statutes are also stored, one JSON object per chapter in the shared statute store (R2 `statutes/mo/ch-<n>.json`,
+ * written by scripts/bake-sections.mjs + upload-chapters.mjs, read through shared/src/stored-statute.ts). The
+ * gateway hands the pack its R2 binding as `_r2` (manifest injectR2). A section in the stored copy is answered
+ * with NO upstream fetch; only a section the copy cannot answer falls back to the live path. Nothing is
+ * evaluated at module scope.
  */
 
 // Bound every fetch() in this pack to a fixed timeout — an upstream that
@@ -1108,6 +1195,28 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       hint: 'Sections look like "565.020" (murder 1) or "577.010" (DWI).' };
   }
   const url = `${BASE}${encodeURIComponent(raw)}`;
+
+  // Stored copy first: no upstream fetch at all.
+  const stored = await storedChapterSection(args._r2, 'statutes/mo', raw.split('.')[0], raw);
+  if (stored) {
+    const { head, hit } = stored;
+    if (hit) {
+      return {
+        citation: `Mo. Rev. Stat. \u00A7 ${raw}`, section: raw, heading: hit.h ?? null,
+        text: hit.t, text_chars: hit.t.length, url, effective: hit.e ?? null,
+        source: 'Missouri Revisor of Statutes, Revised Statutes of Missouri',
+        attribution: 'State statutes are public record.',
+        served_from: 'stored-copy', stale: false, data_as_of: head.dataAsOf,
+      };
+    }
+    if (!head.toc.includes(raw)) {
+      return { found: false, reason: 'section_not_found', section: raw, served_from: 'stored-copy', data_as_of: head.dataAsOf,
+        message: `No section ${raw} in the Missouri Revised Statutes (chapter ${head.chapter} as of ${head.dataAsOf}).`,
+        hint: 'Section numbers are not contiguous \u2014 repealed sections are normal.' };
+    }
+    // Listed in the chapter but no text stored: ask the source.
+  }
+
   const res = await pwFetch(url, { headers: { 'User-Agent': UA } });
   if (res.status === 404) {
     return { found: false, reason: 'section_not_found', section: raw,

@@ -2,7 +2,7 @@
 
 Keyless. Example: `565.020`.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1882+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1856+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 Answers HTTP 200 for a citation that does not exist, so the section number itself is confirmed in the returned text before the page is treated as a statute.
 
@@ -12,6 +12,34 @@ distinguishable from a HIT before shipping.
 ## Data source
 
 Official state legislature site. Statutes are public record.
+
+## Stored copy and `data_as_of` (fleet #3754)
+
+The Revisor of Statutes' site refuses requests that leave from some data centres (58 "upstream down" against 17
+successes from external callers over 14 days). A cache cannot help a first touch, so the Revised Statutes of Missouri
+are stored, one JSON object per chapter, in the shared statute store (R2, `statutes/mo/`) that the Michigan, Ohio,
+West Virginia and Wisconsin packs also use. The gateway hands the pack its R2 binding and the pack reads only the
+object a call names. A section found there is answered with no upstream request; the response says
+`served_from: "stored-copy"` and carries `data_as_of` (when that chapter was last read from the source) and
+`effective` (the section's effective date). A section the copy cannot answer (chapter missing, object unreadable, or
+listed with no stored text) falls back to the live read. Absence is never remembered.
+
+Nothing is loaded at module scope: the data never enters the gateway bundle. The reader is
+`shared/src/stored-statute.ts`, the same one the Montana pack uses.
+
+## Refresh
+
+```
+MO_DATA_DIR=<dir> node mcps/missouri-code/scripts/bake-sections.mjs     # all chapters -> <dir>
+MO_DATA_DIR=<dir> node mcps/missouri-code/scripts/bake-sections.mjs --only 565
+MO_DATA_DIR=<dir> node mcps/missouri-code/scripts/upload-chapters.mjs   # publish to R2 (statutes/mo/), changed files only
+```
+
+The publisher offers no chapter-level text and no bulk file, so the refresh makes one request per chapter for its
+section list and one per section. Sequential, a delay between requests, an honest user agent, bounded retries, a
+stop on the first 429/403/451, raw pages kept so an interrupted run resumes. Exit 0 only if every listed section was
+fetched and parsed and the totals clear the floors. The baked files are a working copy, not committed (`.bake/` is
+gitignored).
 
 ## Quick Start
 
@@ -57,7 +85,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1882+ data sources. The
+Both URLs reach the same gateway and the same 1856+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
